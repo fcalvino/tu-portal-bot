@@ -97,6 +97,7 @@ def open_app() -> int | None:
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
+            "--window-size=1280,800",
         ]
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(30):
@@ -509,20 +510,34 @@ async def _reiniciar_y_buscar(ws_url: str, especialidad: str, profesional: str) 
     }}
     if (!inputs || inputs.length < 2) return 'ERROR: inputs no encontrados';
 
+    // Setter nativo para disparar correctamente Angular change detection en headless
+    const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+
     function typeInto(inp, text) {{
-        inp.focus(); inp.click(); inp.value = '';
+        inp.focus();
+        inp.click();
+        nativeSetter.call(inp, '');
+        inp.dispatchEvent(new Event('input', {{bubbles:true}}));
         for (const ch of text) {{
-            inp.value += ch;
-            inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+            nativeSetter.call(inp, inp.value + ch);
             inp.dispatchEvent(new KeyboardEvent('keydown', {{bubbles:true, key:ch}}));
-            inp.dispatchEvent(new KeyboardEvent('keyup',   {{bubbles:true, key:ch}}));
+            inp.dispatchEvent(new Event('input', {{bubbles:true}}));
+            inp.dispatchEvent(new KeyboardEvent('keyup', {{bubbles:true, key:ch}}));
         }}
+        inp.dispatchEvent(new Event('change', {{bubbles:true}}));
     }}
 
     // Especialidad
     typeInto(inputs[0], '{especialidad}');
-    await new Promise(r => setTimeout(r, 1500));
-    const espOpts = [...document.querySelectorAll('mat-option')];
+    // Esperar hasta 4s a que aparezcan las opciones
+    const espOpts = await (async () => {{
+        for (let i = 0; i < 20; i++) {{
+            const opts = [...document.querySelectorAll('mat-option')];
+            if (opts.length > 0) return opts;
+            await new Promise(r => setTimeout(r, 200));
+        }}
+        return [];
+    }})();
     const espMatch = espOpts.find(o => o.textContent.toLowerCase().includes('{especialidad.lower()}'));
     if (!espMatch) return 'ERROR: especialidad no encontrada';
     espMatch.click();
@@ -530,8 +545,15 @@ async def _reiniciar_y_buscar(ws_url: str, especialidad: str, profesional: str) 
 
     // Profesional
     typeInto(inputs[1], '{profesional}');
-    await new Promise(r => setTimeout(r, 1500));
-    const proOpts = [...document.querySelectorAll('mat-option')];
+    // Esperar hasta 4s a que aparezcan las opciones
+    const proOpts = await (async () => {{
+        for (let i = 0; i < 20; i++) {{
+            const opts = [...document.querySelectorAll('mat-option')];
+            if (opts.length > 0) return opts;
+            await new Promise(r => setTimeout(r, 200));
+        }}
+        return [];
+    }})();
     const proMatch = proOpts.find(o => o.textContent.toLowerCase().includes('{profesional.lower()}'));
     if (!proMatch) return 'ERROR: profesional no encontrado';
     proMatch.click();

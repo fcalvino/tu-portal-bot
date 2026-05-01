@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import platform
 import subprocess
 import sys
+import time
 from datetime import datetime
 
 # Asegurar que importamos desde el directorio del script
@@ -36,6 +38,66 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("bot")
+
+# ---------------------------------------------------------------------------
+# Alerta de crédito Railway
+# ---------------------------------------------------------------------------
+_BOT_START_TIME = time.time()
+_CREDIT_ALERT_SENT = False
+_CREDIT_ALERT_DAYS = 18  # ~$3.60 de $5 → avisa cuando queda ~$1.40
+
+
+def _query_railway_usage(token: str) -> float | None:
+    """Consulta el uso actual en Railway via GraphQL. Retorna USD o None."""
+    query = json.dumps({"query": "{ me { usage { currentPeriodTotalUsage } } }"})
+    req = urllib.request.Request(
+        "https://backboard.railway.com/graphql/v2",
+        data=query.encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+    )
+    raw = urllib.request.urlopen(req, timeout=10).read()
+    data = json.loads(raw)
+    return data["data"]["me"]["usage"]["currentPeriodTotalUsage"]
+
+
+def _enviar_alerta_credito(detalle: str) -> None:
+    tg = (f"⚠️ <b>Crédito Railway bajo</b>\n\n"
+          f"{detalle}\n\n"
+          f"Verificá tu saldo en railway.app/account/billing\n"
+          f"El bot puede detenerse pronto.")
+    enviar_telegram(tg)
+    log.warning("Alerta de crédito Railway enviada: %s", detalle)
+
+
+def _check_railway_credit() -> None:
+    """Envía alerta Telegram si el crédito de Railway está por agotarse."""
+    global _CREDIT_ALERT_SENT
+    if _CREDIT_ALERT_SENT:
+        return
+
+    # Nivel 1: consulta real a la API si hay token
+    token = os.environ.get("RAILWAY_API_TOKEN", "")
+    if token:
+        try:
+            usage = _query_railway_usage(token)
+            if usage is not None and usage >= 4.0:  # queda < $1
+                _enviar_alerta_credito(f"${usage:.2f} usados de $5.00")
+                _CREDIT_ALERT_SENT = True
+                return
+            return  # API funcionó y no hay problema todavía
+        except Exception:
+            pass  # fallback a tiempo
+
+    # Nivel 2 (fallback): alerta por días transcurridos
+    dias = (time.time() - _BOT_START_TIME) / 86400
+    if dias >= _CREDIT_ALERT_DAYS:
+        _enviar_alerta_credito(
+            f"El bot lleva {dias:.0f} días corriendo (~${dias * 0.20:.2f} estimados de $5.00)"
+        )
+        _CREDIT_ALERT_SENT = True
+
+
+# ---------------------------------------------------------------------------
 
 
 def enviar_telegram(texto: str) -> None:
@@ -125,6 +187,7 @@ async def main():
         ciclo += 1
         hora = datetime.now().strftime("%H:%M:%S")
         log.info("--- Ciclo %d [%s] ---", ciclo, hora)
+        _check_railway_credit()
 
         try:
             resultado = await ac.buscar_turno_mas_cercano(

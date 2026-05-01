@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>Tu Portal — Test client</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 24px; max-width: 900px; }
+  button { padding: 8px 14px; margin: 4px; cursor: pointer; }
+  pre { background: #111; color: #0f0; padding: 12px; height: 400px; overflow: auto; font-size: 12px; }
+  .row { margin-bottom: 8px; }
+  input { padding: 6px; }
+  .bot-section { border: 2px solid #0066cc; border-radius: 8px; padding: 12px; margin: 12px 0; background: #f0f6ff; }
+  .bot-section h3 { margin: 0 0 8px 0; color: #0066cc; }
+  #bot-status { font-weight: bold; }
+  .found { color: #009900; font-weight: bold; }
+  .not-found { color: #666; }
+</style>
+</head>
+<body>
+<h2>Tu Portal — WebSocket test client</h2>
+
+<div class="row">
+  <button onclick="send({action:'open'})">Open + Login</button>
+  <button onclick="send({action:'login'})">Login</button>
+  <button onclick="send({action:'status'})">Status</button>
+  <button onclick="send({action:'close'})">Close</button>
+  <button onclick="send({action:'debug_ui'})">Debug UI</button>
+</div>
+
+<div class="bot-section">
+  <h3>Bot de Turnos</h3>
+  <div class="row">
+    <label>Especialidad: <input id="bot-esp" value="DERMATOLOGIA" style="width:180px" /></label>
+    <label>Profesional: <input id="bot-pro" value="Rusiñol" style="width:150px" /></label>
+    <label>Mes: <input id="bot-mes" value="Mayo" style="width:80px" /></label>
+    <label>Anio: <input id="bot-anio" value="2026" style="width:60px" type="number" /></label>
+    <label>Seg: <input id="bot-int" value="30" style="width:50px" type="number" /></label>
+  </div>
+  <div class="row">
+    <button onclick="startBot()" style="background:#0066cc;color:#fff">Iniciar Bot</button>
+    <button onclick="send({action:'bot_stop'})" style="background:#cc3300;color:#fff">Detener Bot</button>
+    <button onclick="send({action:'bot_status'})">Estado</button>
+    <span id="bot-status"></span>
+  </div>
+</div>
+
+<div class="row">
+  <label>Especialidad: <input id="especialidad" placeholder="ej: CLINICA MEDICA" style="width:180px" /></label>
+  <label>Profesional: <input id="profesional" placeholder="ej: Garcia" style="width:150px" /></label>
+  <button onclick="sendReserva()">Reservar Turno</button>
+</div>
+
+<div class="row">
+  <input id="script" placeholder='tell application "Tu Portal" to activate' style="width:60%" />
+  <button onclick="sendScript()">Run AppleScript</button>
+</div>
+
+<pre id="out"></pre>
+<script>
+  const out = document.getElementById('out');
+  const botStatus = document.getElementById('bot-status');
+  const ws = new WebSocket('ws://127.0.0.1:8765');
+  ws.onopen = () => logMsg('[connected]');
+  ws.onclose = () => logMsg('[disconnected]');
+  ws.onerror = (e) => logMsg('[error] ' + e.message);
+  ws.onmessage = (m) => {
+    const data = JSON.parse(m.data);
+    if (data.type === 'bot_tick') {
+      const ts = new Date().toLocaleTimeString();
+      if (data.encontrado) {
+        const t = data.turno_cercano || {};
+        logMsg(`< [BOT #${data.ciclo} ${ts}] TURNO ENCONTRADO! ${t.fecha} ${t.hora} - ${t.profesional} - ${t.lugar}`);
+        botStatus.textContent = 'TURNO ENCONTRADO!';
+        botStatus.className = 'found';
+      } else {
+        const msg = data.mensaje || data.error || 'sin resultado';
+        logMsg(`< [BOT #${data.ciclo} ${ts}] ${msg}`);
+        botStatus.textContent = `Ciclo ${data.ciclo}: ${msg}`;
+        botStatus.className = 'not-found';
+      }
+    } else {
+      logMsg('< ' + m.data);
+    }
+  };
+
+  function logMsg(s) { out.textContent += s + '\n'; out.scrollTop = out.scrollHeight; }
+  function send(o) { const s = JSON.stringify(o); logMsg('> ' + s); ws.send(s); }
+
+  function startBot() {
+    send({
+      action: 'bot_start',
+      especialidad: document.getElementById('bot-esp').value,
+      profesional:  document.getElementById('bot-pro').value,
+      mes:          document.getElementById('bot-mes').value,
+      anio:         parseInt(document.getElementById('bot-anio').value),
+      intervalo:    parseInt(document.getElementById('bot-int').value),
+    });
+    botStatus.textContent = 'Iniciando...';
+    botStatus.className = '';
+  }
+
+  function sendScript() { send({action:'applescript', script: document.getElementById('script').value}); }
+  function sendReserva() {
+    send({
+      action: 'reservar_turno',
+      especialidad: document.getElementById('especialidad').value,
+      profesional:  document.getElementById('profesional').value,
+    });
+  }
+</script>
+</body>
+</html>

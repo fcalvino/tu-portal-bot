@@ -6,14 +6,14 @@ RUN apt-get update && apt-get install -y \
     gnupg \
     ca-certificates \
     fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libcups2 \
+    libasound2t64 \
+    libatk-bridge2.0-0t64 \
+    libatk1.0-0t64 \
+    libcups2t64 \
     libdbus-1-3 \
     libdrm2 \
     libgbm1 \
-    libgtk-3-0 \
+    libgtk-3-0t64 \
     libnspr4 \
     libnss3 \
     libxcomposite1 \
@@ -23,8 +23,8 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     xdg-utils \
     --no-install-recommends \
-    && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+    && wget -q -O /usr/share/keyrings/google-chrome.asc https://dl.google.com/linux/linux_signing_key.pub \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.asc] http://dl.google.com/linux/chrome/deb/ stable main" \
        > /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable --no-install-recommends \

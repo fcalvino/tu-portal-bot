@@ -164,7 +164,7 @@ def notificar(turno: dict, todos: list[dict]) -> None:
 async def main():
     parser = argparse.ArgumentParser(description="Bot de búsqueda de turnos")
     parser.add_argument("--especialidad", default="DERMATOLOGIA")
-    parser.add_argument("--profesional", default="Rusiñol")
+    parser.add_argument("--profesional", default="TODOS")
     parser.add_argument("--mes", default="Mayo")
     parser.add_argument("--anio", type=int, default=2026)
     parser.add_argument("--intervalo", type=int, default=30,

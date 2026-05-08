@@ -168,7 +168,7 @@ async def handle(websocket):
 
                 elif action == "bot_start":
                     esp  = msg.get("especialidad", "DERMATOLOGIA")
-                    pro  = msg.get("profesional", "Rusiñol")
+                    pro  = msg.get("profesional", "TODOS")
                     mes  = msg.get("mes", "Mayo")
                     anio = msg.get("anio", 2026)
                     intervalo = msg.get("intervalo", 30)

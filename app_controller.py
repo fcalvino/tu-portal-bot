@@ -409,6 +409,11 @@ MESES = {
     "Septiembre": 9, "Octubre": 10, "Noviembre": 11, "Diciembre": 12,
 }
 MESES_INV = {v: k for k, v in MESES.items()}
+MESES_ABREV = {
+    "Enero": "ENE", "Febrero": "FEB", "Marzo": "MAR", "Abril": "ABR",
+    "Mayo": "MAY", "Junio": "JUN", "Julio": "JUL", "Agosto": "AGO",
+    "Septiembre": "SEP", "Octubre": "OCT", "Noviembre": "NOV", "Diciembre": "DIC",
+}
 
 
 async def _dismiss_session_dialog(ws_url: str) -> bool:
@@ -648,16 +653,22 @@ async def _extraer_horarios_dia(ws_url: str, dia: int) -> list[dict]:
 
     const turnos = [];
     const lines = section.split('\\n').map(l => l.trim()).filter(Boolean);
+    const esLugar = l => l.includes('POLICLINICA') || l.includes('HOSPITAL') || l.includes('Centro');
+    const esDireccion = l => l.includes('Pueyrredón') || l.includes('Dirección') || l.includes('Av.');
     let turno = {{}};
+    let esperandoProfesional = false;
     for (const line of lines) {{
-        if (line.startsWith('Fecha'))   {{ if (turno.hora) turnos.push(turno); turno = {{}}; }}
-        if (line.match(/^\\d{{2}}-[A-Z]{{3}}-\\d{{2}}$/))  turno.fecha = line;
-        if (line.match(/^\\d{{2}}:\\d{{2}}$/))              turno.hora = line;
-        if (line.includes('RUSI'))                         turno.profesional = line;
-        if (line.includes('POLICLINICA') || line.includes('HOSPITAL') || line.includes('Centro'))
-            turno.lugar = line;
-        if (line.includes('Pueyrredón') || line.includes('Dirección'))
-            turno.direccion = line;
+        if (line.startsWith('Fecha')) {{
+            if (turno.hora) turnos.push(turno);
+            turno = {{}};
+            esperandoProfesional = false;
+        }}
+        if (line.match(/^\\d{{2}}-[A-Z]{{3}}-\\d{{2}}$/)) turno.fecha = line;
+        if (line.match(/^\\d{{2}}:\\d{{2}}$/)) {{ turno.hora = line; esperandoProfesional = true; }}
+        if (esLugar(line))      {{ turno.lugar = line;    esperandoProfesional = false; }}
+        if (esDireccion(line))  {{ turno.direccion = line; esperandoProfesional = false; }}
+        if (esperandoProfesional && !turno.profesional && !esLugar(line) && !esDireccion(line) && !line.match(/^\\d/))
+            turno.profesional = line;
     }}
     if (turno.hora) turnos.push(turno);
     return JSON.stringify(turnos);
@@ -735,6 +746,16 @@ async def buscar_turno_mas_cercano(
     if not todos_los_turnos:
         return {"encontrado": False, "turnos": [], "turno_cercano": None,
                 "error": None, "mensaje": "Días marcados pero sin horarios"}
+
+    # Filtrar solo turnos del mes y año solicitados (safety net si el portal redirige a otro mes)
+    mes_abrev = MESES_ABREV.get(mes, "???")
+    anio_sufijo = str(anio)[-2:]
+    patron_mes = f"-{mes_abrev}-{anio_sufijo}"
+    todos_los_turnos = [t for t in todos_los_turnos if patron_mes in t.get("fecha", "")]
+
+    if not todos_los_turnos:
+        return {"encontrado": False, "turnos": [], "turno_cercano": None,
+                "error": None, "mensaje": f"Sin turnos de {mes} {anio} (el portal mostró otro mes)"}
 
     # Ordenar por fecha+hora y tomar el más cercano
     todos_los_turnos.sort(key=lambda t: (t.get("dia", 99), t.get("hora", "99:99")))

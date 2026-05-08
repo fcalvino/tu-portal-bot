@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -m 'feat: cambiar default de profesional de Rusiñol a TODOS *)"
+    ]
+  }
+}

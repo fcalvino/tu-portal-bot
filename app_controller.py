@@ -769,6 +769,76 @@ async def buscar_turno_mas_cercano(
     }
 
 
+async def buscar_turnos_multiples_profesionales(
+    especialidad: str,
+    profesionales: list[str],
+    mes: str,
+    anio: int,
+    fechas_excluidas: list[int] | None = None,
+) -> dict:
+    """
+    Busca turnos para múltiples profesionales y fusiona resultados.
+    Excluye fechas especificadas (por defecto, día 10).
+    """
+    if fechas_excluidas is None:
+        fechas_excluidas = [10]
+
+    todos_los_turnos = []
+    errores = []
+
+    for profesional in profesionales:
+        log.info("Buscando turnos para %s...", profesional)
+        resultado = await buscar_turno_mas_cercano(especialidad, profesional, mes, anio)
+        if resultado.get("encontrado"):
+            todos_los_turnos.extend(resultado.get("turnos", []))
+        elif resultado.get("error"):
+            errores.append(f"{profesional}: {resultado['error']}")
+        else:
+            log.info("Sin turnos para %s: %s", profesional, resultado.get("mensaje", "sin datos"))
+
+    if not todos_los_turnos:
+        error_msg = "; ".join(errores) if errores else "Sin turnos disponibles"
+        return {
+            "encontrado": False,
+            "turnos": [],
+            "turno_cercano": None,
+            "error": error_msg if errores else None,
+            "mensaje": "No se encontraron turnos disponibles",
+        }
+
+    # Eliminar duplicados por fecha+hora+lugar
+    vistos = set()
+    turnos_unicos = []
+    for turno in todos_los_turnos:
+        key = (turno.get("fecha"), turno.get("hora"), turno.get("lugar"))
+        if key not in vistos:
+            vistos.add(key)
+            turnos_unicos.append(turno)
+
+    # Filtrar fechas excluidas
+    turnos_filtrados = [t for t in turnos_unicos if t.get("dia") not in fechas_excluidas]
+
+    if not turnos_filtrados:
+        return {
+            "encontrado": False,
+            "turnos": [],
+            "turno_cercano": None,
+            "error": None,
+            "mensaje": f"No se encontraron turnos disponibles (excluido día 10 de {mes})",
+        }
+
+    # Ordenar y seleccionar el más cercano
+    turnos_filtrados.sort(key=lambda t: (t.get("dia", 99), t.get("hora", "99:99")))
+    cercano = turnos_filtrados[0]
+
+    return {
+        "encontrado": True,
+        "turnos": turnos_filtrados,
+        "turno_cercano": cercano,
+        "error": None,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Debug UI via CDP
 # ---------------------------------------------------------------------------

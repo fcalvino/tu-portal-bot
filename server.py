@@ -51,13 +51,20 @@ _bot_ciclo = 0
 _bot_ultimo: dict = {}
 
 
-async def _bot_loop(websocket, especialidad, profesional, mes, anio, intervalo):
+async def _bot_loop(websocket, especialidad, profesionales, mes, anio, intervalo):
     global _bot_ciclo, _bot_ultimo
     _bot_ciclo = 0
+    usar_multiples = isinstance(profesionales, list) and len(profesionales) > 1
     while not _bot_stop.is_set():
         _bot_ciclo += 1
         try:
-            resultado = await ac.buscar_turno_mas_cercano(especialidad, profesional, mes, anio)
+            if usar_multiples:
+                resultado = await ac.buscar_turnos_multiples_profesionales(
+                    especialidad, profesionales, mes, anio, fechas_excluidas=[10]
+                )
+            else:
+                prof = profesionales[0] if isinstance(profesionales, list) else profesionales
+                resultado = await ac.buscar_turno_mas_cercano(especialidad, prof, mes, anio)
             _bot_ultimo = resultado
             await websocket.send(json.dumps({
                 "type": "bot_tick", "ciclo": _bot_ciclo, **resultado
@@ -168,7 +175,12 @@ async def handle(websocket):
 
                 elif action == "bot_start":
                     esp  = msg.get("especialidad", "DERMATOLOGIA")
-                    pro  = msg.get("profesional", "TODOS")
+                    if "profesionales" in msg:
+                        profs = msg.get("profesionales")
+                        if isinstance(profs, str):
+                            profs = [profs]
+                    else:
+                        profs = [msg.get("profesional", "TODOS")]
                     mes  = msg.get("mes", "Mayo")
                     anio = msg.get("anio", 2026)
                     intervalo = msg.get("intervalo", 30)
@@ -178,7 +190,7 @@ async def handle(websocket):
                         await asyncio.sleep(0.5)
                     _bot_stop = asyncio.Event()
                     _bot_task = asyncio.create_task(
-                        _bot_loop(websocket, esp, pro, mes, anio, intervalo)
+                        _bot_loop(websocket, esp, profs, mes, anio, intervalo)
                     )
                     await websocket.send(json.dumps({
                         "type": "ack", "action": "bot_start", "ok": True,

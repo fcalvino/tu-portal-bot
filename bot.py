@@ -164,20 +164,44 @@ def notificar(turno: dict, todos: list[dict]) -> None:
 async def main():
     parser = argparse.ArgumentParser(description="Bot de búsqueda de turnos")
     parser.add_argument("--especialidad", default="DERMATOLOGIA")
-    parser.add_argument("--profesional", default="TODOS")
+    parser.add_argument("--profesional", default=None, action="append",
+                        help="Profesionales a buscar (repetir para múltiples)")
     parser.add_argument("--mes", default="Mayo")
     parser.add_argument("--anio", type=int, default=2026)
-    parser.add_argument("--intervalo", type=int, default=30,
+    parser.add_argument("--intervalo", type=int, default=5,
                         help="Segundos entre cada búsqueda")
     parser.add_argument("--no-parar", action="store_true",
                         help="No detenerse al encontrar turno, seguir buscando")
     args = parser.parse_args()
 
+    # DEBUG: ver qué recibió argparse
+    import sys
+    print("=" * 60)
+    print(f"sys.argv COMPLETO: {sys.argv}")
+    print(f"args.profesional: {args.profesional}")
+    print(f"len(args.profesional): {len(args.profesional) if args.profesional else 'None'}")
+    print("=" * 60)
+
+    # Determinar si buscar múltiples o un solo profesional
+    if args.profesional and len(args.profesional) > 1:
+        profesionales = args.profesional
+        usar_multiples = True
+    elif args.profesional:
+        profesionales = args.profesional
+        usar_multiples = False
+    else:
+        profesionales = ["TODOS"]
+        usar_multiples = False
+
     log.info("Bot iniciado")
     log.info("  Especialidad: %s", args.especialidad)
-    log.info("  Profesional:  %s", args.profesional)
+    if usar_multiples:
+        log.info("  Profesionales: %s", ", ".join(profesionales))
+    else:
+        log.info("  Profesional:  %s", profesionales[0])
     log.info("  Mes objetivo: %s %d", args.mes, args.anio)
     log.info("  Intervalo:    %ds", args.intervalo)
+    log.info("  Día 10 excluido: Sí" if usar_multiples else "  (búsqueda estándar)")
     print()
 
     ciclo = 0
@@ -190,12 +214,21 @@ async def main():
         _check_railway_credit()
 
         try:
-            resultado = await ac.buscar_turno_mas_cercano(
-                especialidad=args.especialidad,
-                profesional=args.profesional,
-                mes=args.mes,
-                anio=args.anio,
-            )
+            if usar_multiples:
+                resultado = await ac.buscar_turnos_multiples_profesionales(
+                    especialidad=args.especialidad,
+                    profesionales=profesionales,
+                    mes=args.mes,
+                    anio=args.anio,
+                    fechas_excluidas=[10],
+                )
+            else:
+                resultado = await ac.buscar_turno_mas_cercano(
+                    especialidad=args.especialidad,
+                    profesional=profesionales[0],
+                    mes=args.mes,
+                    anio=args.anio,
+                )
             errores_seguidos = 0
 
             if resultado["encontrado"]:

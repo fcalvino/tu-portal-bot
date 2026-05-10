@@ -17,7 +17,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Core Components
 
-**1. app_controller.py** — Business logic layer (680+ lines)
+**1. app_controller.py** — Business logic layer
 - **Chrome automation via CDP**: Opens Tu Portal as a PWA, navigates forms, extracts data
 - **Session management**: Login flow using JS injection to bypass field detection
 - **Appointment search**: `buscar_turno_mas_cercano(especialidad, profesional, mes, anio)` → full search pipeline
@@ -28,7 +28,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **Form interaction**: Fills dropdowns, submaries searches via CDP Runtime.evaluate
 - **Process lifecycle**: `open_app()`, `close_app()`, `is_running()`
 
-**2. server.py** — WebSocket server (230 lines)
+**2. server.py** — WebSocket server
 - **Local-only server**: Binds to 127.0.0.1:8765, rejects remote connections
 - **Actions** (JSON-RPC style):
   - `open` — Launch Tu Portal Chrome instance + perform initial login
@@ -43,7 +43,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `logs_subscribe` / `logs_unsubscribe` — Stream app output
 - **Notifications**: When appointment found → macOS notification + Telegram alert (with date/time/professional/location)
 
-**3. bot.py** — Standalone CLI bot (120+ lines)
+**3. bot.py** — Standalone CLI bot
 - Runs `buscar_turno_mas_cercano()` in a loop at fixed interval
 - **Args**: `--mes`, `--anio`, `--especialidad`, `--profesional`, `--intervalo`
 - **Railway credit monitoring**: Queries Railway API, sends Telegram alert when credit ≤ $1.40

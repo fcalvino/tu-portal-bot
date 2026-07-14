@@ -22,8 +22,128 @@ log = logging.getLogger("tu-portal-server")
 APP_NAME    = "Tu Portal"
 PROCESS_NAME = "app_mode_loader"
 PORTAL_URL  = "https://www.hospitalaleman.com/tuportal/"
-CDP_PORT    = 9223
-CDP_PROFILE = "/tmp/tu-portal-cdp-profile"
+
+# ---------------------------------------------------------------------------
+# Multi-sesión CDP
+# Cada proceso de bot puede usar su propio puerto y perfil de Chrome:
+#   CDP_PORT / CDP_PROFILE  (explícitos)
+#   SESSION_ID              (deriva perfil y puerto si no se setean)
+#
+# Ejemplos:
+#   SESSION_ID=traumato CDP_PORT=9223 python bot.py ...
+#   SESSION_ID=clinica  CDP_PORT=9224 python bot.py ...
+# ---------------------------------------------------------------------------
+
+_CDP_PORT_BASE = 9223
+
+
+def _safe_session_slug(name: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9_-]+", "-", (name or "").strip()).strip("-").lower()
+    return s or "default"
+
+
+def _port_for_session(session: str, base: int = _CDP_PORT_BASE) -> int:
+    """Puerto determinístico en [base, base+99] a partir del session id."""
+    h = 0
+    for c in session:
+        h = (h * 31 + ord(c)) % 100
+    return base + h
+
+
+def _resolve_cdp_config(
+    port: int | str | None = None,
+    profile: str | None = None,
+    session_id: str | None = None,
+    *,
+    ignore_env_port: bool = False,
+    ignore_env_profile: bool = False,
+) -> tuple[int, str, str]:
+    """Resuelve (port, profile, session_id) desde args o env.
+
+    Prioridad:
+      port:    arg > env CDP_PORT (si no se ignora) > derivado de SESSION_ID > 9223
+      profile: arg > env CDP_PROFILE (si no se ignora) > /tmp/tu-portal-cdp-{session} > default
+    """
+    if session_id is not None:
+        sid = str(session_id).strip()
+    else:
+        sid = os.environ.get("SESSION_ID", "").strip()
+
+    env_port = "" if ignore_env_port else os.environ.get("CDP_PORT", "").strip()
+    env_profile = "" if ignore_env_profile else os.environ.get("CDP_PROFILE", "").strip()
+
+    if port is not None and str(port).strip() != "":
+        resolved_port = int(port)
+    elif env_port:
+        resolved_port = int(env_port)
+    elif sid:
+        resolved_port = _port_for_session(_safe_session_slug(sid))
+    else:
+        resolved_port = _CDP_PORT_BASE
+
+    if profile is not None and str(profile).strip() != "":
+        resolved_profile = str(profile).strip()
+    elif env_profile:
+        resolved_profile = env_profile
+    elif sid:
+        resolved_profile = f"/tmp/tu-portal-cdp-{_safe_session_slug(sid)}"
+    else:
+        resolved_profile = "/tmp/tu-portal-cdp-profile"
+
+    return resolved_port, resolved_profile, sid
+
+
+# Valores activos (se pueden reconfigurar con configure_cdp antes de abrir Chrome)
+CDP_PORT: int
+CDP_PROFILE: str
+SESSION_ID: str
+CDP_PORT, CDP_PROFILE, SESSION_ID = _resolve_cdp_config()
+
+
+def configure_cdp(
+    port: int | str | None = None,
+    profile: str | None = None,
+    session_id: str | None = None,
+) -> tuple[int, str, str]:
+    """Reconfigura puerto/perfil CDP de esta instancia (llamar antes de open_app).
+
+    Útil cuando bot.py recibe --session / --cdp-port por CLI después del import.
+    Sincroniza también os.environ para procesos hijos y logs.
+
+    Si se pasa un session_id nuevo y no se pasa port/profile, se re-derivan
+    (no se reutiliza un CDP_PROFILE/CDP_PORT residual de una sesión anterior).
+    """
+    global CDP_PORT, CDP_PROFILE, SESSION_ID
+
+    # Si cambia el session_id y no se pasan port/profile, no heredar env residual
+    # de un configure_cdp() anterior. Si el session_id es el mismo (p.ej. viene
+    # del env), sí respetar CDP_PORT/CDP_PROFILE del entorno.
+    ignore_env_port = False
+    ignore_env_profile = False
+    if session_id is not None:
+        new_sid = str(session_id).strip()
+        if new_sid != SESSION_ID:
+            if port is None or str(port).strip() == "":
+                ignore_env_port = True
+            if profile is None or str(profile).strip() == "":
+                ignore_env_profile = True
+
+    CDP_PORT, CDP_PROFILE, SESSION_ID = _resolve_cdp_config(
+        port, profile, session_id,
+        ignore_env_port=ignore_env_port,
+        ignore_env_profile=ignore_env_profile,
+    )
+    os.environ["CDP_PORT"] = str(CDP_PORT)
+    os.environ["CDP_PROFILE"] = CDP_PROFILE
+    if SESSION_ID:
+        os.environ["SESSION_ID"] = SESSION_ID
+    else:
+        os.environ.pop("SESSION_ID", None)
+    log.info(
+        "CDP multi-sesión: session=%r port=%s profile=%s",
+        SESSION_ID or "(default)", CDP_PORT, CDP_PROFILE,
+    )
+    return CDP_PORT, CDP_PROFILE, SESSION_ID
 
 
 def _find_chrome_bin() -> str:
@@ -77,9 +197,13 @@ def _ensure_chrome_prefs():
 
 
 def open_app() -> int | None:
-    """Abre Tu Portal en una instancia Chrome dedicada con CDP habilitado."""
+    """Abre Tu Portal en una instancia Chrome dedicada con CDP habilitado.
+
+    Usa CDP_PORT + CDP_PROFILE de esta sesión (ver configure_cdp / env vars).
+    """
     os.makedirs(CDP_PROFILE, exist_ok=True)
     _ensure_chrome_prefs()
+    log.info("Abriendo Chrome CDP port=%s profile=%s", CDP_PORT, CDP_PROFILE)
     cmd = [
         CHROME_BIN,
         f"--app={PORTAL_URL}",

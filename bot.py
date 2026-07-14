@@ -3,11 +3,31 @@ Bot de búsqueda de turnos — Hospital Alemán, Tu Portal.
 
 Busca turnos cada INTERVALO segundos y notifica cuando encuentra uno.
 
-Uso:
+Uso simple:
     python bot.py
     python bot.py --mes-desde Junio --dia-desde 30 --mes-hasta Julio --dia-hasta 16 --anio 2026
     python bot.py --especialidad "TRAUMATOLOGIA TOBILLO/PIE" --profesional "EQUIPO DE TRAUMATOLOGIA DR ROFRANO" --mes-desde Junio --dia-desde 30 --mes-hasta Julio --dia-hasta 16
     python bot.py --especialidad "CLINICA MEDICA" --profesional "Garcia" --intervalo 60
+
+Multi-sesión (varias terminales en paralelo, cada una con su Chrome):
+    # Terminal 1
+    python bot.py --session traumato --cdp-port 9223 \\
+      --especialidad "TRAUMATOLOGIA TOBILLO/PIE" \\
+      --profesional "EQUIPO DE TRAUMATOLOGIA DR ROFRANO" \\
+      --mes-desde Junio --dia-desde 30 --mes-hasta Julio --dia-hasta 16
+
+    # Terminal 2
+    python bot.py --session clinica --cdp-port 9224 \\
+      --especialidad "CLINICA MEDICA" --profesional "Garcia" \\
+      --mes-desde Julio --dia-desde 1 --mes-hasta Julio --dia-hasta 31
+
+    # Terminal 3 (puerto/perfil derivados de --session si no pasás --cdp-port)
+    python bot.py --session dermato \\
+      --especialidad "DERMATOLOGIA" --profesional "Rusiñol" \\
+      --mes-desde Julio --dia-desde 1 --mes-hasta Agosto --dia-hasta 15
+
+También con env vars:
+    SESSION_ID=traumato CDP_PORT=9223 CDP_PROFILE=/tmp/tu-portal-cdp-traumato python bot.py ...
 """
 from __future__ import annotations
 
@@ -33,12 +53,21 @@ import urllib.parse
 
 import app_controller as ac
 
+# Session label se rellena en main() tras parsear --session
+_SESSION_LABEL = ""
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("bot")
+
+
+def _session_prefix() -> str:
+    if _SESSION_LABEL:
+        return f"[{_SESSION_LABEL}] "
+    return ""
 
 # ---------------------------------------------------------------------------
 # Alerta de crédito Railway
@@ -123,17 +152,19 @@ def notificar(turno: dict, todos: list[dict]) -> None:
     hora  = turno.get("hora", "?")
     prof  = turno.get("profesional", "?")
     lugar = turno.get("lugar", "?")
+    prefix = _session_prefix()
 
-    msg = f"TURNO: {fecha} {hora} - {prof} - {lugar}"
+    msg = f"{prefix}TURNO: {fecha} {hora} - {prof} - {lugar}"
+    title = f"Tu Portal Bot{_SESSION_LABEL and f' [{_SESSION_LABEL}]' or ''}"
 
     # Notificaciones macOS (solo en Mac)
     if platform.system() == "Darwin":
         escaped = msg.replace('"', '\\"')
+        title_esc = title.replace('"', '\\"')
         subprocess.run([
             "osascript", "-e",
-            f'display notification "{escaped}" with title "Tu Portal Bot" sound name "Glass"'
+            f'display notification "{escaped}" with title "{title_esc}" sound name "Glass"'
         ], capture_output=True)
-        import time
         for _ in range(3):
             subprocess.Popen(
                 ["afplay", "/System/Library/Sounds/Glass.aiff"],
@@ -142,7 +173,11 @@ def notificar(turno: dict, todos: list[dict]) -> None:
             time.sleep(0.5)
 
     # Telegram (siempre — funciona en Mac y servidor)
-    tg_msg = f"🏥 <b>TURNO ENCONTRADO</b>\n\n📅 {fecha} 🕐 {hora}\n👨‍⚕️ {prof}\n📍 {lugar}"
+    session_line = f"\n🏷️ Sesión: <code>{_SESSION_LABEL}</code>" if _SESSION_LABEL else ""
+    tg_msg = (
+        f"🏥 <b>TURNO ENCONTRADO</b>{session_line}\n\n"
+        f"📅 {fecha} 🕐 {hora}\n👨‍⚕️ {prof}\n📍 {lugar}"
+    )
     if len(todos) > 1:
         tg_msg += f"\n\nTotal disponibles: {len(todos)}"
         for t in todos:
@@ -152,7 +187,7 @@ def notificar(turno: dict, todos: list[dict]) -> None:
     # Consola
     print()
     print("=" * 60)
-    print(f"  TURNO ENCONTRADO!")
+    print(f"  {prefix}TURNO ENCONTRADO!")
     print(f"  {msg}")
     if len(todos) > 1:
         print(f"\n  Total de turnos disponibles: {len(todos)}")
@@ -163,10 +198,46 @@ def notificar(turno: dict, todos: list[dict]) -> None:
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Bot de búsqueda de turnos")
+    parser = argparse.ArgumentParser(
+        description="Bot de búsqueda de turnos (soporta multi-sesión en paralelo)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Multi-sesión: cada terminal necesita su propio Chrome (puerto + perfil distintos).
+
+  Terminal 1:
+    python bot.py --session traumato --cdp-port 9223 \\
+      --especialidad "TRAUMATOLOGIA TOBILLO/PIE" \\
+      --profesional "EQUIPO DE TRAUMATOLOGIA DR ROFRANO"
+
+  Terminal 2:
+    python bot.py --session clinica --cdp-port 9224 \\
+      --especialidad "CLINICA MEDICA" --profesional "Garcia"
+
+  Terminal 3:
+    python bot.py --session dermato --cdp-port 9225 \\
+      --especialidad "DERMATOLOGIA" --profesional "Rusiñol"
+
+Sin --cdp-port, el puerto se deriva de --session (rango 9223-9322).
+Ver también: multi-session.example.sh
+""".strip(),
+    )
     parser.add_argument("--especialidad", default="TRAUMATOLOGIA TOBILLO/PIE")
     parser.add_argument("--profesional", default=None, action="append",
                         help="Profesionales a buscar (repetir para múltiples)")
+
+    # Multi-sesión / aislamiento de Chrome
+    parser.add_argument(
+        "--session", default=None,
+        help="ID de sesión (etiqueta logs/Telegram; deriva perfil y puerto si no se pasan)",
+    )
+    parser.add_argument(
+        "--cdp-port", type=int, default=None,
+        help="Puerto remote-debugging de Chrome (default: 9223 o derivado de --session)",
+    )
+    parser.add_argument(
+        "--cdp-profile", default=None,
+        help="user-data-dir de Chrome (default: /tmp/tu-portal-cdp[-SESSION])",
+    )
 
     # Rango de fechas (preferido, soporta cruce de meses)
     parser.add_argument("--mes-desde", default="Junio")
@@ -186,6 +257,17 @@ async def main():
                         help="No detenerse al encontrar turno, seguir buscando")
     args = parser.parse_args()
 
+    # Configurar aislamiento CDP antes de tocar Chrome
+    global _SESSION_LABEL
+    ac.configure_cdp(
+        port=args.cdp_port,
+        profile=args.cdp_profile,
+        session_id=args.session or os.environ.get("SESSION_ID") or None,
+    )
+    _SESSION_LABEL = ac.SESSION_ID or ""
+    if _SESSION_LABEL:
+        log.name = f"bot.{_SESSION_LABEL}"
+
     # Determinar si buscar múltiples o un solo profesional
     if args.profesional and len(args.profesional) > 1:
         profesionales = args.profesional
@@ -197,7 +279,8 @@ async def main():
         profesionales = ["EQUIPO DE TRAUMATOLOGIA DR ROFRANO"]
         usar_multiples = False
 
-    log.info("Bot iniciado")
+    log.info("Bot iniciado%s", f" (sesión={_SESSION_LABEL})" if _SESSION_LABEL else "")
+    log.info("  CDP:          port=%s profile=%s", ac.CDP_PORT, ac.CDP_PROFILE)
     log.info("  Especialidad: %s", args.especialidad)
     if usar_multiples:
         log.info("  Profesionales: %s", ", ".join(profesionales))

@@ -37,4 +37,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "bot.py", "--mes", "Junio", "--anio", "2026"]
+CMD ["python", "bot.py", "--mes-desde", "Junio", "--dia-desde", "30", "--mes-hasta", "Julio", "--dia-hasta", "16", "--anio", "2026"]

@@ -51,7 +51,8 @@ _bot_ciclo = 0
 _bot_ultimo: dict = {}
 
 
-async def _bot_loop(websocket, especialidad, profesionales, mes, anio, intervalo):
+async def _bot_loop(websocket, especialidad, profesionales, mes, anio, intervalo, min_dia=10,
+                  mes_desde=None, dia_desde=None, mes_hasta=None, dia_hasta=None):
     global _bot_ciclo, _bot_ultimo
     _bot_ciclo = 0
     usar_multiples = isinstance(profesionales, list) and len(profesionales) > 1
@@ -62,9 +63,20 @@ async def _bot_loop(websocket, especialidad, profesionales, mes, anio, intervalo
                 resultado = await ac.buscar_turnos_multiples_profesionales(
                     especialidad, profesionales, mes, anio, fechas_excluidas=[10]
                 )
+            elif mes_desde and mes_hasta:
+                prof = profesionales[0] if isinstance(profesionales, list) else profesionales
+                d_desde = int(dia_desde) if dia_desde is not None else 1
+                d_hasta = int(dia_hasta) if dia_hasta is not None else 31
+                resultado = await ac.buscar_turnos_en_rango(
+                    especialidad, prof,
+                    mes_desde, anio, d_desde,
+                    mes_hasta, anio, d_hasta
+                )
             else:
                 prof = profesionales[0] if isinstance(profesionales, list) else profesionales
-                resultado = await ac.buscar_turno_mas_cercano(especialidad, prof, mes, anio)
+                resultado = await ac.buscar_turno_mas_cercano(
+                    especialidad, prof, mes, anio, min_dia=min_dia
+                )
             _bot_ultimo = resultado
             await websocket.send(json.dumps({
                 "type": "bot_tick", "ciclo": _bot_ciclo, **resultado
@@ -174,28 +186,44 @@ async def handle(websocket):
                     await websocket.send(json.dumps({"type": "ack", "action": "logs_unsubscribe", "ok": True}))
 
                 elif action == "bot_start":
-                    esp  = msg.get("especialidad", "DERMATOLOGIA")
+                    esp  = msg.get("especialidad", "TRAUMATOLOGIA TOBILLO/PIE")
                     if "profesionales" in msg:
                         profs = msg.get("profesionales")
                         if isinstance(profs, str):
                             profs = [profs]
                     else:
-                        profs = [msg.get("profesional", "TODOS")]
-                    mes  = msg.get("mes", "Mayo")
+                        profs = [msg.get("profesional", "EQUIPO DE TRAUMATOLOGIA DR ROFRANO")]
                     anio = msg.get("anio", 2026)
-                    intervalo = msg.get("intervalo", 30)
+                    intervalo = msg.get("intervalo", 5)
+                    min_dia = msg.get("min_dia", 10)
+
+                    # Rango (nuevo)
+                    mes_desde = msg.get("mes_desde") or msg.get("mes-desde")
+                    dia_desde = msg.get("dia_desde") or msg.get("dia-desde")
+                    mes_hasta = msg.get("mes_hasta") or msg.get("mes-hasta")
+                    dia_hasta = msg.get("dia_hasta") or msg.get("dia-hasta")
+
+                    # legacy single mes (si no se mandó rango)
+                    mes  = msg.get("mes", "Junio")
+
                     if _bot_task and not _bot_task.done():
                         _bot_stop.set()
                         _bot_task.cancel()
                         await asyncio.sleep(0.5)
                     _bot_stop = asyncio.Event()
                     _bot_task = asyncio.create_task(
-                        _bot_loop(websocket, esp, profs, mes, anio, intervalo)
+                        _bot_loop(websocket, esp, profs, mes, anio, intervalo, min_dia,
+                                  mes_desde=mes_desde, dia_desde=dia_desde,
+                                  mes_hasta=mes_hasta, dia_hasta=dia_hasta)
                     )
                     await websocket.send(json.dumps({
                         "type": "ack", "action": "bot_start", "ok": True,
-                        "config": {"especialidad": esp, "profesional": pro,
-                                   "mes": mes, "anio": anio, "intervalo": intervalo}
+                        "config": {
+                            "especialidad": esp, "profesionales": profs,
+                            "mes": mes, "anio": anio, "intervalo": intervalo, "min_dia": min_dia,
+                            "mes_desde": mes_desde, "dia_desde": dia_desde,
+                            "mes_hasta": mes_hasta, "dia_hasta": dia_hasta
+                        }
                     }))
 
                 elif action == "bot_stop":

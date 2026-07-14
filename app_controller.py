@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import urllib.request
 from typing import AsyncIterator
@@ -414,25 +415,125 @@ MESES_ABREV = {
     "Mayo": "MAY", "Junio": "JUN", "Julio": "JUL", "Agosto": "AGO",
     "Septiembre": "SEP", "Octubre": "OCT", "Noviembre": "NOV", "Diciembre": "DIC",
 }
+ABREV_TO_NUM = {abbr: MESES[name] for name, abbr in MESES_ABREV.items()}
 
 
-async def _dismiss_session_dialog(ws_url: str) -> bool:
-    """Cierra el dialog 'Tu sesión ha expirado' si está presente. Retorna True si lo encontró."""
-    js = """
-    (() => {
-        const expired = document.body.innerText.includes('Tu sesión ha expirado');
-        if (!expired) return false;
-        const btns = [...document.querySelectorAll('button')];
-        const aceptar = btns.find(b => b.textContent.trim() === 'Aceptar');
-        if (aceptar) { aceptar.click(); return true; }
-        return false;
-    })()
+def _mes_a_num(mes_nombre: str) -> int:
+    """Convierte nombre de mes (Junio, JULIO, etc) a número 1-12."""
+    if not mes_nombre:
+        return 0
+    # direct
+    if mes_nombre in MESES:
+        return MESES[mes_nombre]
+    # case insensitive + partial
+    n = mes_nombre.strip().lower()
+    for nombre, num in MESES.items():
+        if nombre.lower() == n or n in nombre.lower():
+            return num
+    return 0
+
+
+def _parse_dia_from_fecha(fecha: str | None) -> int | None:
+    """Extrae día desde '30-JUN-26' o similar."""
+    if not fecha:
+        return None
+    m = re.match(r'^(\d{2})-', str(fecha).strip())
+    return int(m.group(1)) if m else None
+
+
+def _parse_mes_from_fecha(fecha: str | None) -> int | None:
+    """Extrae número de mes desde la abreviatura en la fecha del portal."""
+    if not fecha:
+        return None
+    m = re.search(r'-([A-Z]{3})-', str(fecha).upper())
+    if m:
+        return ABREV_TO_NUM.get(m.group(1))
+    return None
+
+
+def _dia_desde_fecha(fecha: str | None) -> int | None:
+    """Extrae el número de día (1-31) desde el string de fecha que devuelve el portal (ej: '15-JUN-26')."""
+    if not fecha:
+        return None
+    m = re.match(r'^(\d{2})-', str(fecha).strip())
+    return int(m.group(1)) if m else None
+
+
+async def _dismiss_blocking_dialogs(ws_url: str) -> bool:
+    """Cierra dialogs bloqueantes con botón 'Aceptar' (sesión expirada, info anteojos/oftalmología,
+    warnings, u otros avisos modales). Retorna True si se cerró alguno.
     """
+    js = """
+(() => {
+    const bodyText = (document.body.innerText || '').toLowerCase();
+    const isKnownBlocking =
+        bodyText.includes('tu sesión ha expirado') ||
+        bodyText.includes('anteojos') ||
+        bodyText.includes('3 meses') ||
+        bodyText.includes('oftalmolog') ||
+        bodyText.includes('receta de anteojos') ||
+        bodyText.includes('pérdida o rotura');
+
+    // Buscar contenedores de dialog típicos (Angular Material + genéricos)
+    let containers = [
+        ...document.querySelectorAll(
+            'mat-dialog-container, .cdk-overlay-pane, [role="dialog"], .mat-mdc-dialog-container'
+        )
+    ].filter(el => {
+        try {
+            const r = el.getBoundingClientRect();
+            return r.width > 140 && r.height > 70 && el.offsetParent !== null;
+        } catch { return false; }
+    });
+
+    if (containers.length === 0 && isKnownBlocking) {
+        containers = [document.body];
+    }
+
+    const buttons = [...document.querySelectorAll('button')];
+    let clicked = false;
+
+    const isTargetBtn = (b) => {
+        const t = (b.textContent || '').trim();
+        return t === 'Aceptar' || t === 'Entendido' || t === 'OK' || t.toLowerCase() === 'aceptar';
+    };
+
+    for (const c of containers) {
+        const btn = buttons.find(b => {
+            if (!isTargetBtn(b)) return false;
+            if (b.offsetParent === null) return false;
+            if (c.contains(b)) return true;
+            if (b.closest('.cdk-overlay-pane, mat-dialog-container, [role="dialog"], .mat-mdc-dialog-container')) return true;
+            return containers.length <= 1;
+        });
+        if (btn) {
+            btn.click();
+            clicked = true;
+            break;
+        }
+    }
+
+    if (!clicked && isKnownBlocking) {
+        // Fallback: cualquier Aceptar visible cuando detectamos texto conocido
+        const a = buttons.find(b => (b.textContent || '').trim() === 'Aceptar' && b.offsetParent !== null);
+        if (a) {
+            a.click();
+            clicked = true;
+        }
+    }
+
+    return clicked;
+})()
+"""
     try:
-        result = await _cdp_eval(ws_url, js, timeout=5.0)
+        result = await _cdp_eval(ws_url, js, timeout=6.0)
         return result.get("value") is True
     except Exception:
         return False
+
+
+# Alias de compatibilidad (por si se referencia en otros lados)
+_dismiss_session_dialog = _dismiss_blocking_dialogs
 
 
 async def ensure_session() -> str | None:
@@ -454,10 +555,10 @@ async def ensure_session() -> str | None:
         if not target:
             return None
 
-    # Detectar dialog de sesión expirada (aparece sobre la página sin cambiar URL)
-    dismissed = await _dismiss_session_dialog(target["webSocketDebuggerUrl"])
+    # Detectar y cerrar cualquier dialog bloqueante (sesión expirada, info de anteojos, warnings, etc.)
+    dismissed = await _dismiss_blocking_dialogs(target["webSocketDebuggerUrl"])
     if dismissed:
-        log.info("Dialog 'Tu sesión ha expirado' detectado y cerrado, esperando redirect...")
+        log.info("Dialog bloqueante detectado y cerrado (sesión expirada o aviso informativo como anteojos), esperando...")
         await asyncio.sleep(2.0)
         target = await _wait_for_page_target(timeout=10.0)
         if not target:
@@ -473,6 +574,9 @@ async def ensure_session() -> str | None:
         target = await _wait_for_page_target(timeout=10.0)
         if not target:
             return None
+
+    # Un último intento de cerrar cualquier aviso residual después de estabilizar
+    await _dismiss_blocking_dialogs(target["webSocketDebuggerUrl"])
 
     return target["webSocketDebuggerUrl"]
 
@@ -498,22 +602,71 @@ async def _reiniciar_y_buscar(ws_url: str, especialidad: str, profesional: str) 
         return "ERROR: no se reconectó CDP tras recarga", ws_url
     ws_url = target["webSocketDebuggerUrl"]
 
+    # Cerrar cualquier modal informativo o aviso que aparezca al cargar /reservarTurno
+    if await _dismiss_blocking_dialogs(ws_url):
+        log.info("Dialog bloqueante cerrado después de cargar reservarTurno (posible aviso de anteojos / oftalmología u otro)")
+        await asyncio.sleep(1.2)
+
     # Paso 3: esperar que la página cargue y llenar formulario
     js = f"""
 (async () => {{
-    // Verificar si hay dialog de sesión expirada
+    function _tryDismissBlocking() {{
+        const txt = (document.body.innerText || '').toLowerCase();
+        const looksBlocking = txt.includes('tu sesión ha expirado') ||
+                              txt.includes('anteojos') || txt.includes('3 meses') ||
+                              txt.includes('oftalmolog') || txt.includes('receta');
+        const containers = [
+            ...document.querySelectorAll('mat-dialog-container, .cdk-overlay-pane, [role="dialog"], .mat-mdc-dialog-container')
+        ].filter(el => {{
+            try {{
+                const r = el.getBoundingClientRect();
+                return r.width > 100 && r.height > 60;
+            }} catch {{ return false; }}
+        }});
+        const btns = [...document.querySelectorAll('button')];
+        let targetBtn = btns.find(b => {{
+            const t = (b.textContent || '').trim();
+            if (t !== 'Aceptar' && t !== 'Entendido') return false;
+            if (b.offsetParent === null) return false;
+            return containers.some(c => c.contains(b)) || b.closest('.cdk-overlay-pane');
+        }});
+        if (!targetBtn && looksBlocking) {{
+            targetBtn = btns.find(b => (b.textContent || '').trim() === 'Aceptar' && b.offsetParent !== null);
+        }}
+        if (targetBtn) {{
+            targetBtn.click();
+            return true;
+        }}
+        return false;
+    }}
+
+    // Verificar / cerrar si hay dialog de sesión expirada
     if (document.body.innerText.includes('Tu sesión ha expirado')) return 'SESSION_EXPIRED';
 
-    // Esperar inputs (la página acaba de cargar)
+    // Esperar inputs (la página acaba de cargar). Intentar cerrar modales en cada iteración.
     const dl = Date.now() + 10000;
     let inputs;
     while (Date.now() < dl) {{
         if (document.body.innerText.includes('Tu sesión ha expirado')) return 'SESSION_EXPIRED';
+        _tryDismissBlocking();
         inputs = document.querySelectorAll('input[id^="mat-input"]');
         if (inputs.length >= 2) break;
         await new Promise(r => setTimeout(r, 300));
     }}
     if (!inputs || inputs.length < 2) return 'ERROR: inputs no encontrados';
+
+    // Asegurar modalidad Presencial (el popup de anteojos suele aparecer en este flujo)
+    (() => {{
+        const pres = [...document.querySelectorAll('button,mat-button-toggle, .mat-button-toggle')]
+            .find(el => (el.textContent || '').toLowerCase().includes('presencial'));
+        if (pres) {{
+            // Click aunque parezca activo; es idempotente y asegura el estado correcto
+            pres.click();
+        }}
+    }})();
+    await new Promise(r => setTimeout(r, 400));
+    _tryDismissBlocking();
+    await new Promise(r => setTimeout(r, 300));
 
     // Setter nativo para disparar correctamente Angular change detection en headless
     const nativeSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -537,6 +690,7 @@ async def _reiniciar_y_buscar(ws_url: str, especialidad: str, profesional: str) 
     // Esperar hasta 4s a que aparezcan las opciones
     const espOpts = await (async () => {{
         for (let i = 0; i < 20; i++) {{
+            _tryDismissBlocking();
             const opts = [...document.querySelectorAll('mat-option')];
             if (opts.length > 0) return opts;
             await new Promise(r => setTimeout(r, 200));
@@ -546,13 +700,16 @@ async def _reiniciar_y_buscar(ws_url: str, especialidad: str, profesional: str) 
     const espMatch = espOpts.find(o => o.textContent.toLowerCase().includes('{especialidad.lower()}'));
     if (!espMatch) return 'ERROR: especialidad no encontrada';
     espMatch.click();
-    await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 800));
+    _tryDismissBlocking();
+    await new Promise(r => setTimeout(r, 200));
 
     // Profesional
     typeInto(inputs[1], '{profesional}');
     // Esperar hasta 4s a que aparezcan las opciones
     const proOpts = await (async () => {{
         for (let i = 0; i < 20; i++) {{
+            _tryDismissBlocking();
             const opts = [...document.querySelectorAll('mat-option')];
             if (opts.length > 0) return opts;
             await new Promise(r => setTimeout(r, 200));
@@ -562,63 +719,134 @@ async def _reiniciar_y_buscar(ws_url: str, especialidad: str, profesional: str) 
     const proMatch = proOpts.find(o => o.textContent.toLowerCase().includes('{profesional.lower()}'));
     if (!proMatch) return 'ERROR: profesional no encontrado';
     proMatch.click();
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 400));
+    _tryDismissBlocking();
+    await new Promise(r => setTimeout(r, 100));
 
-    // Click Buscar
+    // Click Buscar (y limpiar cualquier modal que haya aparecido al seleccionar)
+    _tryDismissBlocking();
     const buscar = [...document.querySelectorAll('button')].find(b =>
         b.textContent.trim().includes('Buscar'));
     if (!buscar) return 'ERROR: boton Buscar no encontrado';
     buscar.click();
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 1200));
+    _tryDismissBlocking();
+    await new Promise(r => setTimeout(r, 1800));
     return 'OK';
 }})()
 """
     result = await _cdp_eval(ws_url, js, timeout=30.0)
-    return result.get("value", "ERROR: sin respuesta"), ws_url
+    ret = result.get("value", "ERROR: sin respuesta")
+
+    # Último intento de cerrar modales justo después del submit (el popup puede aparecer post-Buscar)
+    if await _dismiss_blocking_dialogs(ws_url):
+        log.info("Dialog bloqueante (ej. anteojos/oftalmología) cerrado post-Buscar")
+        await asyncio.sleep(1.0)
+
+    return ret, ws_url
 
 
 async def _navegar_a_mes(ws_url: str, mes_nombre: str, anio: int) -> str:
-    """Navega el calendario al mes/año objetivo. Retorna 'OK', 'NO_AGENDA' o 'ERROR:...'."""
+    """Navega el calendario al mes/año objetivo. Retorna 'OK', 'NO_AGENDA' o 'ERROR:...'.
+
+    Mejoras de robustez:
+    - Comparación de mes normalizada (case-insensitive, sin acentos básicos, trim).
+    - Manejo más laxo de botones Anterior/Siguiente (includes + lower).
+    - Si el cálculo de índice falla por nombre de mes desconocido, intenta seguir
+      navegando hasta 12 pasos o hasta que el header normalizado coincida.
+    - Verificación final explícita del mes alcanzado.
+    """
+    # Cerrar modales antes de tocar el calendario (importante para popups post-Buscar)
+    if await _dismiss_blocking_dialogs(ws_url):
+        await asyncio.sleep(0.5)
+
     js = f"""
 (async () => {{
-    const objetivo = '{mes_nombre} {anio}';
+    const objetivoRaw = '{mes_nombre} {anio}';
+
+    function norm(s) {{
+        if (!s) return '';
+        let x = String(s).trim().toLowerCase();
+        x = x.replace(/[áàäâ]/g, 'a')
+             .replace(/[éèëê]/g, 'e')
+             .replace(/[íìïî]/g, 'i')
+             .replace(/[óòöô]/g, 'o')
+             .replace(/[úùüû]/g, 'u')
+             .replace(/septiembre|setiembre/g, 'septiembre');
+        return x;
+    }}
+
+    const objetivoNorm = norm(objetivoRaw);
+
+    // Lista canónica para índice (sin acentos para robustez)
+    const mesesCanon = ['enero','febrero','marzo','abril','mayo','junio',
+                        'julio','agosto','septiembre','octubre','noviembre','diciembre'];
+
+    function monthToIdx(name, year) {{
+        const n = norm(name);
+        let idx = mesesCanon.indexOf(n);
+        if (idx === -1) {{
+            // fallback: intentar match parcial
+            for (let i=0; i<mesesCanon.length; i++) if (n.includes(mesesCanon[i]) || mesesCanon[i].includes(n)) return i;
+            return -1;
+        }}
+        return idx;
+    }}
 
     for (let i = 0; i < 12; i++) {{
+        // Intentar cerrar cualquier aviso que pudiera aparecer durante la navegación del mes
+        (() => {{
+            const btn = [...document.querySelectorAll('button')].find(b => (b.textContent||'').trim()==='Aceptar' && b.offsetParent);
+            if (btn) btn.click();
+        }})();
         const monthMatch = document.body.innerText.match(
-            /(Enero|Febrero|Marzo|Abril|Mayo|Junio|Julio|Agosto|Septiembre|Octubre|Noviembre|Diciembre) (\\d{{4}})/
+            /(Enero|Febrero|Marzo|Abril|Mayo|Junio|Julio|Agosto|Septiembre|Octubre|Noviembre|Diciembre) (\\d{{4}})/i
         );
         if (!monthMatch) return 'ERROR: no se encontró mes en el calendario';
-        const mesActual = monthMatch[0];
 
-        if (mesActual === objetivo) return 'OK';
+        const mesActualRaw = monthMatch[0];
+        const mesActualNorm = norm(mesActualRaw);
 
-        // Determinar dirección
-        const meses = ['Enero','Febrero','Marzo','Abril','Mayo','Junio',
-                       'Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-        const actualIdx = meses.indexOf(monthMatch[1]) + parseInt(monthMatch[2]) * 12;
-        const objParts = objetivo.split(' ');
-        const objIdx = meses.indexOf(objParts[0]) + parseInt(objParts[1]) * 12;
+        if (mesActualNorm === objetivoNorm) return 'OK';
 
+        // Calcular dirección con tolerancia
+        const actualMonthName = monthMatch[1];
+        const actualYear = parseInt(monthMatch[2], 10);
+        const actualM = monthToIdx(actualMonthName, actualYear);
+        const objParts = objetivoRaw.split(' ');
+        const objM = monthToIdx(objParts[0], parseInt(objParts[1], 10));
+        const actualIdx = (actualM >= 0 ? actualM : 0) + actualYear * 12;
+        const objIdx = (objM >= 0 ? objM : 0) + parseInt(objParts[1], 10) * 12;
+
+        let went = false;
         if (actualIdx > objIdx) {{
-            // Ir hacia atrás
             const anteriorBtn = [...document.querySelectorAll('button,span')]
-                .find(b => b.textContent.trim() === 'Anterior');
+                .find(b => norm(b.textContent).includes('anterior'));
             if (!anteriorBtn || anteriorBtn.disabled ||
                 anteriorBtn.getAttribute('disabled') !== null ||
                 anteriorBtn.closest('button')?.disabled) {{
                 return 'NO_AGENDA';
             }}
             (anteriorBtn.closest('button') || anteriorBtn).click();
+            went = true;
         }} else {{
-            // Ir hacia adelante
             const siguienteBtn = [...document.querySelectorAll('button,span')]
-                .find(b => b.textContent.trim() === 'Siguiente');
+                .find(b => norm(b.textContent).includes('siguiente'));
             if (!siguienteBtn) return 'ERROR: boton Siguiente no encontrado';
             (siguienteBtn.closest('button') || siguienteBtn).click();
+            went = true;
         }}
+        if (!went) break;
         await new Promise(r => setTimeout(r, 1500));
     }}
-    return 'ERROR: no se pudo llegar al mes objetivo en 12 intentos';
+
+    // Verificación final
+    const finalMatch = document.body.innerText.match(
+        /(Enero|Febrero|Marzo|Abril|Mayo|Junio|Julio|Agosto|Septiembre|Octubre|Noviembre|Diciembre) (\\d{{4}})/i
+    );
+    if (finalMatch && norm(finalMatch[0]) === objetivoNorm) return 'OK';
+
+    return 'ERROR: no se pudo llegar al mes objetivo en 12 intentos (actual: ' + (finalMatch ? finalMatch[0] : 'desconocido') + ')';
 }})()
 """
     result = await _cdp_eval(ws_url, js, timeout=30.0)
@@ -627,6 +855,7 @@ async def _navegar_a_mes(ws_url: str, mes_nombre: str, anio: int) -> str:
 
 async def _obtener_dias_disponibles(ws_url: str) -> list[int]:
     """Retorna los números de día que tienen turno-disponible en el mes actual."""
+    await _dismiss_blocking_dialogs(ws_url)
     js = """
     (() => {
         const btns = [...document.querySelectorAll('button.turno-disponible')];
@@ -637,12 +866,17 @@ async def _obtener_dias_disponibles(ws_url: str) -> list[int]:
     return result.get("value", [])
 
 
-async def _extraer_horarios_dia(ws_url: str, dia: int) -> list[dict]:
-    """Clickea un día con turno-disponible y extrae los horarios."""
+async def _extraer_horarios_dia(ws_url: str, dia_label: int) -> list[dict]:
+    """Clickea un día (por label del calendario) y extrae los horarios.
+    El 'dia' de cada turno se deriva preferentemente del campo 'fecha' que reporta el portal
+    (ej. '15-JUN-26'), no del label del botón clickeado. Esto asegura que el filtro min_dia
+    y el turno más cercano usen el día real del turno.
+    """
+    await _dismiss_blocking_dialogs(ws_url)
     js = f"""
 (async () => {{
     const dayBtn = [...document.querySelectorAll('button.turno-disponible')]
-        .find(b => b.textContent.trim() === '{dia}');
+        .find(b => b.textContent.trim() === '{dia_label}');
     if (!dayBtn) return JSON.stringify([]);
     dayBtn.click();
     await new Promise(r => setTimeout(r, 2000));
@@ -671,6 +905,17 @@ async def _extraer_horarios_dia(ws_url: str, dia: int) -> list[dict]:
             turno.profesional = line;
     }}
     if (turno.hora) turnos.push(turno);
+
+    // Derivar 'dia' del dato real del portal (fecha), no del label del botón.
+    // Guardamos dia_label solo para diagnóstico / auditoría.
+    for (const t of turnos) {{
+        if (t.fecha) {{
+            const d = parseInt(t.fecha.substring(0, 2), 10);
+            if (!isNaN(d)) t.dia = d;
+        }}
+        if (t.dia == null) t.dia = {dia_label};
+        t.dia_label = {dia_label};
+    }}
     return JSON.stringify(turnos);
 }})()
 """
@@ -682,21 +927,147 @@ async def _extraer_horarios_dia(ws_url: str, dia: int) -> list[dict]:
         return []
 
 
+async def buscar_turnos_en_rango(
+    especialidad: str,
+    profesional: str,
+    mes_desde: str,
+    anio_desde: int,
+    dia_desde: int,
+    mes_hasta: str,
+    anio_hasta: int,
+    dia_hasta: int,
+) -> dict:
+    """
+    Busca turnos disponibles en un rango de fechas INCLUSIVO que puede cruzar meses.
+
+    - Realiza UN solo _reiniciar_y_buscar (form + submit).
+    - Navega a cada mes del rango y recolecta.
+    - Filtra con semántica inclusiva:
+        * mes_desde: dia >= dia_desde
+        * mes_hasta: dia <= dia_hasta
+        * meses intermedios: todos
+    - Ordena cronológicamente (mes, dia, hora) y retorna el más temprano como turno_cercano.
+    - Reutiliza toda la infraestructura existente de navegación y extracción.
+
+    Retorna el mismo contrato que buscar_turno_mas_cercano.
+    """
+    ws_url = await ensure_session()
+    if not ws_url:
+        return {"encontrado": False, "turnos": [], "turno_cercano": None,
+                "error": "No se pudo establecer sesión CDP"}
+
+    search_result, ws_url = await _reiniciar_y_buscar(ws_url, especialidad, profesional)
+
+    if search_result == "SESSION_EXPIRED":
+        log.info("Sesión expirada en rango, re-estableciendo...")
+        ws_url = await ensure_session()
+        if not ws_url:
+            return {"encontrado": False, "turnos": [], "turno_cercano": None,
+                    "error": "Re-login fallido tras sesión expirada"}
+        search_result, ws_url = await _reiniciar_y_buscar(ws_url, especialidad, profesional)
+
+    if search_result.startswith("ERROR"):
+        return {"encontrado": False, "turnos": [], "turno_cercano": None,
+                "error": search_result}
+
+    # Cerrar avisos que puedan haber aparecido después del submit (anteojos etc.)
+    if await _dismiss_blocking_dialogs(ws_url):
+        log.info("Dialog informativo cerrado antes de navegar meses")
+        await asyncio.sleep(0.8)
+
+    # Determinar meses a visitar (simple para rango Jun-Jul u otro par consecutivo)
+    m_desde_num = _mes_a_num(mes_desde)
+    m_hasta_num = _mes_a_num(mes_hasta)
+
+    meses_a_visitar = []
+    if anio_desde == anio_hasta and m_desde_num and m_hasta_num and m_desde_num <= m_hasta_num:
+        for num in range(m_desde_num, m_hasta_num + 1):
+            nombre = MESES_INV.get(num, mes_desde)
+            meses_a_visitar.append((nombre, anio_desde))
+    else:
+        # fallback: visitar explícitamente los dos extremos (raro)
+        meses_a_visitar = [(mes_desde, anio_desde), (mes_hasta, anio_hasta)]
+
+    todos_los_turnos: list[dict] = []
+
+    for mes_n, an in meses_a_visitar:
+        nav_result = await _navegar_a_mes(ws_url, mes_n, an)
+        if nav_result == "NO_AGENDA":
+            continue
+        if nav_result.startswith("ERROR"):
+            log.warning("Navegación a %s %s falló: %s", mes_n, an, nav_result)
+            continue
+
+        dias = await _obtener_dias_disponibles(ws_url)
+        for dia_label in sorted(dias):
+            horarios = await _extraer_horarios_dia(ws_url, dia_label)
+            for h in horarios:
+                if h.get("dia") is None:
+                    h["dia"] = _parse_dia_from_fecha(h.get("fecha")) or _dia_desde_fecha(h.get("fecha")) or dia_label
+                # Enriquecer para filtro y orden multi-mes
+                h["mes"] = mes_n
+                h["anio"] = an
+                h["_mes_num"] = _mes_a_num(mes_n) or _parse_mes_from_fecha(h.get("fecha")) or 0
+            todos_los_turnos.extend(horarios)
+
+    # Filtro INCLUSIVO por rango
+    filtrados = []
+    for t in todos_los_turnos:
+        d = int(t.get("dia") or 0)
+        mn = int(t.get("_mes_num") or 0)
+        if mn == m_desde_num and d < dia_desde:
+            continue
+        if mn == m_hasta_num and d > dia_hasta:
+            continue
+        filtrados.append(t)
+
+    if not filtrados:
+        return {
+            "encontrado": False,
+            "turnos": [],
+            "turno_cercano": None,
+            "error": None,
+            "mensaje": f"Sin turnos disponibles entre el {dia_desde} de {mes_desde} y el {dia_hasta} de {mes_hasta} {anio_hasta}",
+        }
+
+    # Orden cronológico real
+    filtrados.sort(key=lambda t: (t.get("_mes_num", 99), t.get("dia", 99), t.get("hora", "99:99")))
+    cercano = filtrados[0]
+
+    return {
+        "encontrado": True,
+        "turnos": filtrados,
+        "turno_cercano": cercano,
+        "error": None,
+    }
+
+
 async def buscar_turno_mas_cercano(
     especialidad: str,
     profesional: str,
     mes: str,
     anio: int,
+    min_dia: int | None = None,
 ) -> dict:
     """
     Flujo completo de búsqueda:
       1. Asegurar sesión
       2. Reiniciar búsqueda + llenar formulario + Buscar
       3. Navegar al mes objetivo
-      4. Si hay días disponibles, extraer horarios
-      5. Retornar el turno más cercano
+      4. Si hay días disponibles, extraer horarios (por label de botón del calendario)
+      5. (Opcional) Filtrar turnos con dia > min_dia
+      6. Retornar el turno más cercano (entre los válidos)
 
-    Retorna: {"encontrado": bool, "turnos": [...], "turno_cercano": {...} | None, "error": str | None}
+    IMPORTANTE: El campo 'dia' de cada turno se deriva del string 'fecha' que el portal
+    reporta en la sección "Turnos Disponibles" (ej. '15-JUN-26' → dia=15). El label del
+    botón del calendario solo se usa para localizar y hacer click. Esto garantiza que
+    el filtro min_dia y la selección del turno más cercano respeten el día real del turno
+    solicitado por el usuario.
+
+    Retorna: {"encontrado": bool, "turnos": [...], "turno_cercano": {...} | None, "error": str | None, "mensaje": str | None}
+    Si min_dia se provee, solo se consideran y notifican turnos con día > min_dia.
+    Cada turno incluye además 'dia_label' (el número usado para clickear el botón del calendario)
+    para diagnóstico.
     """
     ws_url = await ensure_session()
     if not ws_url:
@@ -720,6 +1091,11 @@ async def buscar_turno_mas_cercano(
         return {"encontrado": False, "turnos": [], "turno_cercano": None,
                 "error": search_result}
 
+    # Cerrar avisos informativos que bloquean el calendario (ej. anteojos)
+    if await _dismiss_blocking_dialogs(ws_url):
+        log.info("Dialog informativo cerrado antes de navegar al mes objetivo")
+        await asyncio.sleep(0.8)
+
     # Paso 3: navegar al mes
     nav_result = await _navegar_a_mes(ws_url, mes, anio)
     if nav_result == "NO_AGENDA":
@@ -729,21 +1105,40 @@ async def buscar_turno_mas_cercano(
         return {"encontrado": False, "turnos": [], "turno_cercano": None,
                 "error": nav_result}
 
-    # Paso 4: días disponibles
+    # Paso 4: días disponibles (labels de botones del calendario del mes actual)
     dias = await _obtener_dias_disponibles(ws_url)
     if not dias:
         return {"encontrado": False, "turnos": [], "turno_cercano": None,
                 "error": None, "mensaje": f"Sin turnos disponibles en {mes} {anio}"}
 
     # Paso 5: extraer horarios de cada día
+    # Clave del fix: _extraer_horarios_dia deriva 'dia' desde la 'fecha' real del portal (no del label).
+    # Usamos el label solo para el clic y como fallback / diagnóstico (dia_label).
     todos_los_turnos = []
-    for dia in sorted(dias):
-        horarios = await _extraer_horarios_dia(ws_url, dia)
+    for dia_label in sorted(dias):
+        horarios = await _extraer_horarios_dia(ws_url, dia_label)
         for h in horarios:
-            h["dia"] = dia
+            if h.get("dia") is None:
+                h["dia"] = _dia_desde_fecha(h.get("fecha")) or dia_label
         todos_los_turnos.extend(horarios)
 
+    # Diagnóstico de consistencia (útil para analizar si el proceso identificaba bien el día solicitado).
+    # Muestra mismatches entre el label del botón del calendario que se clickeó vs. el día contenido en la 'fecha' del turno.
+    if min_dia is not None or len(todos_los_turnos) > 0:
+        for t in todos_los_turnos:
+            real = _dia_desde_fecha(t.get("fecha"))
+            label = t.get("dia_label")
+            if real is not None and label is not None and real != label:
+                log.info("DIA_MISMATCH: label_calendario=%s vs dia_real_fecha=%s (fecha=%s)", label, real, t.get("fecha"))
+
+    # Filtro por día mínimo. Usa el 'dia' real derivado de la 'fecha' que el portal reporta para el turno.
+    if min_dia is not None:
+        todos_los_turnos = [t for t in todos_los_turnos if t.get("dia", 0) > min_dia]
+
     if not todos_los_turnos:
+        if min_dia is not None:
+            return {"encontrado": False, "turnos": [], "turno_cercano": None,
+                    "error": None, "mensaje": f"Sin turnos disponibles posteriores al día {min_dia} en {mes} {anio}"}
         return {"encontrado": False, "turnos": [], "turno_cercano": None,
                 "error": None, "mensaje": "Días marcados pero sin horarios"}
 
@@ -757,7 +1152,7 @@ async def buscar_turno_mas_cercano(
         return {"encontrado": False, "turnos": [], "turno_cercano": None,
                 "error": None, "mensaje": f"Sin turnos de {mes} {anio} (el portal mostró otro mes)"}
 
-    # Ordenar por fecha+hora y tomar el más cercano
+    # Ordenar por el día real (de la fecha) + hora y tomar el más cercano
     todos_los_turnos.sort(key=lambda t: (t.get("dia", 99), t.get("hora", "99:99")))
     cercano = todos_los_turnos[0]
 

@@ -5,7 +5,8 @@ Busca turnos cada INTERVALO segundos y notifica cuando encuentra uno.
 
 Uso:
     python bot.py
-    python bot.py --mes Junio --anio 2026
+    python bot.py --mes-desde Junio --dia-desde 30 --mes-hasta Julio --dia-hasta 16 --anio 2026
+    python bot.py --especialidad "TRAUMATOLOGIA TOBILLO/PIE" --profesional "EQUIPO DE TRAUMATOLOGIA DR ROFRANO" --mes-desde Junio --dia-desde 30 --mes-hasta Julio --dia-hasta 16
     python bot.py --especialidad "CLINICA MEDICA" --profesional "Garcia" --intervalo 60
 """
 from __future__ import annotations
@@ -163,11 +164,22 @@ def notificar(turno: dict, todos: list[dict]) -> None:
 
 async def main():
     parser = argparse.ArgumentParser(description="Bot de búsqueda de turnos")
-    parser.add_argument("--especialidad", default="DERMATOLOGIA")
+    parser.add_argument("--especialidad", default="TRAUMATOLOGIA TOBILLO/PIE")
     parser.add_argument("--profesional", default=None, action="append",
                         help="Profesionales a buscar (repetir para múltiples)")
-    parser.add_argument("--mes", default="Mayo")
+
+    # Rango de fechas (preferido, soporta cruce de meses)
+    parser.add_argument("--mes-desde", default="Junio")
+    parser.add_argument("--dia-desde", type=int, default=30)
+    parser.add_argument("--mes-hasta", default="Julio")
+    parser.add_argument("--dia-hasta", type=int, default=16)
     parser.add_argument("--anio", type=int, default=2026)
+
+    # Legacy single-month (sigue funcionando)
+    parser.add_argument("--mes", default=None, help="Legacy: mes único (usa --mes-desde/--mes-hasta en su lugar)")
+    parser.add_argument("--min-dia", type=int, default=None,
+                        help="Legacy: día mínimo exclusivo dentro de un solo mes")
+
     parser.add_argument("--intervalo", type=int, default=5,
                         help="Segundos entre cada búsqueda")
     parser.add_argument("--no-parar", action="store_true",
@@ -182,7 +194,7 @@ async def main():
         profesionales = args.profesional
         usar_multiples = False
     else:
-        profesionales = ["TODOS"]
+        profesionales = ["EQUIPO DE TRAUMATOLOGIA DR ROFRANO"]
         usar_multiples = False
 
     log.info("Bot iniciado")
@@ -191,7 +203,13 @@ async def main():
         log.info("  Profesionales: %s", ", ".join(profesionales))
     else:
         log.info("  Profesional:  %s", profesionales[0])
-    log.info("  Mes objetivo: %s %d", args.mes, args.anio)
+    if args.mes_desde and args.mes_hasta and not args.mes:
+        log.info("  Rango objetivo: %s %d → %s %d (año %d)",
+                 args.mes_desde, args.dia_desde, args.mes_hasta, args.dia_hasta, args.anio)
+    else:
+        log.info("  Mes objetivo: %s %d", args.mes or args.mes_desde or "Junio", args.anio)
+    if args.min_dia is not None:
+        log.info("  (legacy min_dia: >%d)", args.min_dia)
     log.info("  Intervalo:    %ds", args.intervalo)
     if usar_multiples:
         log.info("  Día 10 excluido: Sí")
@@ -208,19 +226,35 @@ async def main():
 
         try:
             if usar_multiples:
+                # Multi-profesional usa mes único (legacy API)
+                mes = args.mes or args.mes_desde or "Junio"
                 resultado = await ac.buscar_turnos_multiples_profesionales(
                     especialidad=args.especialidad,
                     profesionales=profesionales,
-                    mes=args.mes,
+                    mes=mes,
                     anio=args.anio,
                     fechas_excluidas=[10],
                 )
+            elif args.mes_desde and args.mes_hasta and not args.mes:
+                # Buscador por rango (incluye 30 Jun - 16 Jul)
+                resultado = await ac.buscar_turnos_en_rango(
+                    especialidad=args.especialidad,
+                    profesional=profesionales[0],
+                    mes_desde=args.mes_desde,
+                    anio_desde=args.anio,
+                    dia_desde=args.dia_desde,
+                    mes_hasta=args.mes_hasta,
+                    anio_hasta=args.anio,
+                    dia_hasta=args.dia_hasta,
+                )
             else:
+                # Fallback legacy (mes único)
                 resultado = await ac.buscar_turno_mas_cercano(
                     especialidad=args.especialidad,
                     profesional=profesionales[0],
-                    mes=args.mes,
+                    mes=args.mes or args.mes_desde or "Junio",
                     anio=args.anio,
+                    min_dia=args.min_dia,
                 )
             errores_seguidos = 0
 

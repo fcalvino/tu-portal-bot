@@ -28,13 +28,22 @@
 </div>
 
 <div class="bot-section">
-  <h3>Bot de Turnos</h3>
+  <h3>Bot de Turnos (rango inclusivo)</h3>
   <div class="row">
-    <label>Especialidad: <input id="bot-esp" value="DERMATOLOGIA" style="width:180px" /></label>
-    <label>Profesional: <input id="bot-pro" value="Rusiñol" style="width:150px" /></label>
-    <label>Mes: <input id="bot-mes" value="Mayo" style="width:80px" /></label>
-    <label>Anio: <input id="bot-anio" value="2026" style="width:60px" type="number" /></label>
-    <label>Seg: <input id="bot-int" value="30" style="width:50px" type="number" /></label>
+    <label>Especialidad: <input id="bot-esp" value="TRAUMATOLOGIA TOBILLO/PIE" style="width:280px" /></label>
+    <label>Profesional: <input id="bot-pro" value="EQUIPO DE TRAUMATOLOGIA DR ROFRANO" style="width:220px" /></label>
+  </div>
+  <div class="row">
+    <strong>Desde:</strong>
+    <label>Mes <input id="bot-mes-desde" value="Junio" style="width:68px" /></label>
+    <label>Día <input id="bot-dia-desde" value="30" style="width:42px" type="number" /></label>
+    &nbsp;&nbsp;
+    <strong>Hasta:</strong>
+    <label>Mes <input id="bot-mes-hasta" value="Julio" style="width:68px" /></label>
+    <label>Día <input id="bot-dia-hasta" value="16" style="width:42px" type="number" /></label>
+    &nbsp;&nbsp;
+    <label>Año <input id="bot-anio" value="2026" style="width:52px" type="number" /></label>
+    <label>Seg <input id="bot-int" value="5" style="width:42px" type="number" /></label>
   </div>
   <div class="row">
     <button onclick="startBot()" style="background:#0066cc;color:#fff">Iniciar Bot</button>
@@ -91,7 +100,10 @@
       action: 'bot_start',
       especialidad: document.getElementById('bot-esp').value,
       profesional:  document.getElementById('bot-pro').value,
-      mes:          document.getElementById('bot-mes').value,
+      mes_desde:    document.getElementById('bot-mes-desde').value,
+      dia_desde:    parseInt(document.getElementById('bot-dia-desde').value) || 1,
+      mes_hasta:    document.getElementById('bot-mes-hasta').value,
+      dia_hasta:    parseInt(document.getElementById('bot-dia-hasta').value) || 31,
       anio:         parseInt(document.getElementById('bot-anio').value),
       intervalo:    parseInt(document.getElementById('bot-int').value),
     });
